@@ -1,0 +1,962 @@
+% This buffer is for notes you don't want to save.
+% If you want to create a file, visit that file with C-x C-f,
+% then enter the text in that file's own buffer.
+
+
+% regex_builder is the master control function used to coordinate the
+% construction of the regular expression from the DFA (prolog source
+% file)
+regex_builder():-
+	write("< Please input the file you would like to load, with file extension\n"),
+	write("> "),                        %First, the source file must be determined
+	read(X),
+	open(X,read,Y),
+	state_read(Y,F,K),
+	reverse(K,[_|K1]),                 %the way that state_read works, a result of the
+	                                   %nondeterminism associated with reading from a file,
+					   %necessitates this operation to rid itself of a
+					   %spare random-variable
+	reverse(K1,K2),
+	sort(F,[_|Fs]),
+	final_read(Y,H),
+	reverse(H,[_|H2]),
+	reverse(H2,FinalStates),
+	close(Y),
+	length(Fs,Length),
+	Length1 is Length + 1,		  %since the state list should only be comprised of states 1-(n-1), n = |V|, as
+	                                  %a result of the fact that no edge should lead from any state to 0
+					  %this leaves state 0 unaccounted for, and since the method of compiling the
+					  %final regex depends on finding all non-null elements of the 0th row, one can
+					  %see the need for increasing the length
+					  %of the array by one
+	three_d_list(Length1,Length1,Length1,[ThreeH|ThreeHs]),
+	populate(ThreeH,[(0-l)|Fs],[(0-l)|Fs],K2),	% This is the creation of the first layer of
+	                                       %the 3d block, as it is different from the rest of
+					       %the blocks
+
+	populate_control(ThreeH,ThreeHs,1),
+	last_elem(ThreeHs,LastFrame),          %This merely retrieves the last element of the 3d list,
+	                                       %from whence the final elements will be retrieved
+	compile_final(LastFrame,FinalRegex,[(0-_)],FinalStates),    %This compiles a union group of the set of
+	                    %final states with paths from state 0 to themselves as denoted by the existence of regexes there
+	add_op([+|FinalRegex],Regexer),
+	build_up(Regexer,PolishedRegex),
+	term_string(PolishedRegex,RegexString),
+	string_chars(RegexString,RegexChars),
+	move_star2(RegexChars,RegCharPolished),		 %move_star2 is the mirror image of the move_star function used
+							 %in the regex -> DFA process, and moves the star back to where
+							 %regex convention dictates it should be placed
+	remove_carrot(RegCharPolished,RegCharPolished2),   %this function is used to remove the carrot operator
+	                                                   %which is only used to denote concatenation in a way
+							   %obvious to the program, and which is thus not needed for final
+							   %formatting
+	string_chars(RegexStringStars,RegCharPolished2),
+	write("< Here is the regex generated from "),
+	write(X),
+	write('\n'),
+	write('\t'),
+	write(RegexStringStars).
+
+
+remove_carrot([],[]).
+remove_carrot(['^'|Xs],Ys):-
+	remove_carrot(Xs,Ys).
+remove_carrot([X|Xs],[X|Ys]):-
+	X \= '^',
+	remove_carrot(Xs,Ys).
+
+
+output_bigmatrix(_,[]).
+output_bigmatrix(X,[Y|Ys]):-
+	write(X),
+	write('\n'),
+	output_matrix(Y),
+	X1 is X + 1,
+	output_bigmatrix(X1,Ys).
+
+output_line([]).
+output_line([X|Xs]):-
+	write(X),
+	write("	- "),
+	output_line(Xs).
+
+
+output_matrix([]).
+output_matrix([X|Xs]):-
+	output_line(X),
+	write('\n'),
+	output_matrix(Xs).
+
+compile_final(_,[],[],_):-!.
+compile_final(LastFrame,FinalRegex,[(Int-_)|Xs],FinalStates):-
+	getList(Int,FinalStates,LastFrame,RegexList),
+	compile_final(LastFrame,LastK,Xs,FinalStates),
+	append(RegexList,LastK,FinalRegex),!.
+
+
+
+% build_up is used as a final step to turning the regular expression
+% into a normally formatted one, i.e., one not represented in list form
+build_up([],[]).
+build_up([*,Y],K):-
+	build_up(Y,X),
+	K =.. [*,X],!.
+build_up([+,X,Y],K):-
+	build_up(X,X1),
+	build_up(Y,Y1),
+	K =.. [+,(X1),(Y1)].
+build_up([^,X,Y],K):-
+	build_up(X,X1),
+	build_up(Y,Y1),
+	K =.. [^,X1,Y1].
+build_up(X,X):-
+	not(is_list(X)).
+
+% remove_duplicates is used to remove redundant regular expressions in
+% union groups
+remove_duplicates(_,[],[]).
+remove_duplicates(X,[X|Ys],[X|Zs]):-!,
+	remove_duplicates(X,Ys,Zs).
+remove_duplicates(X,[Y|Ys],[Y|Zs]):-
+	X \= Y,
+	remove_duplicates(X,Ys,Zs).
+
+
+
+
+
+add_plus([X|[]],[Y|[]]):-
+	add_op(X,Y).
+add_plus([lam,[*,F]],[*,X]):-
+	add_op(F,X).
+add_plus([[*,X],lam],[*,Y]):-
+	add_op(X,Y).
+add_plus([lam,lam],lam).
+add_plus([X,X],X).
+add_plus([X,Y],F1):-
+	add_op(X,X1),
+	add_op(Y,Y1),
+	(   (X1  = Y1, F1 = X1);
+	(   (X1 = lam        , Y1 = lam              , F1 = lam        ));   % (lam + lam) = (lam)
+	(   (X1 = A          , Y1 = [^,K,[^,[*,K],A]], F1 = [^,[*,K],A]));   % (a + (b.(b*).a)) = (lam+(b.(b*))).a = (b*).a
+	(   (X1 = S	     , Y1 = [^,[*,S],S]      , F1 = [^,[*,S],S]));   % (a + (a.(a*))) = (a.(a*))
+	(   (X1 = S	     , Y1 = [^,S,[*,S]]      , F1 = [^,S,[*,S]]));
+	(   (X1 = [^,[*,S],S], Y1 = S                , F1 = [^,[*,S],S]));
+	(   (X1 = [^,S,[*,S]], Y1 = S                , F1 = [^,S,[*,S]]));
+	(   (X1 = [^,[*,S],S], Y1 = lam		     , F1 =    [*,S]   ));   %(a.(a*)+lam) = (a*)
+	(   (X1 = [^,S,[*,S]], Y1 = lam              , F1 =    [*,S]   ));
+	(   (X1 = lam        , Y1 = [^,[*,S],S]      , F1 =    [*,S]   ));
+	(   (X1 = lam        , Y1 = [^,S,[*,S]]      , F1 =    [*,S]   ));
+	(   (X1 = [+,S,lam]  , Y1 =    [*,S]         , F1 =    [*,S]   ));   %(a+lam+(a*)) = (a*)
+	(   (Y1 = [+,S,lam]  , X1 =    [*,S]         , F1 =    [*,S]   ));
+	(   (Y1 = [+,lam,S]  , X1 =    [*,S]         , F1 =    [*,S]   ));
+	(   (X1 = [+,lam,S]  , Y1 =    [*,S]         , F1 =    [*,S]   ));
+	(   (X1 \= Y1, F1 = [+,X1,Y1]))),!.
+add_plus([X|Xs],[+,Y,Ys]):-
+	remove_duplicates(X,Xs,Zs),
+	add_op(X,Y),
+	add_plus(Zs,Fs),
+	remove_duplicates(X,Fs,Ys).
+
+
+
+add_carrot([[*,X],[+,X,lam]],[*,X]).
+add_carrot([[*,X],[+,lam,X]],[*,X]).
+add_carrot([[+,X,lam],[*,X]],[*,X]).
+add_carrot([[+,lam,X],[*,X]],[*,X]).
+add_carrot([X,Y],F):-
+	add_op(X,X1),
+	add_op(Y,Y1),
+	(   (   X1 = lam  ,     Y1 = lam           , F = lam        );   % lambda concatenated with lambda is just lambda
+	    (	X1 = lam  ,     Y1 \= lam          , F = Y1         );   % lambda concatenated with some regex is just that regex
+	    (	X1 \= lam ,     Y1 = lam           , F = X1         );
+	    (   X1 = [*,S],     Y1 = [*,S]         , F = [*,S]      );   % ((a)*).((a)*) = ((a*))
+	    (   X1 = [*,S],     Y1 = [+,S,lam]     , F = [*,S]      );   % ((a)*).(lam+a) =((a)*)
+	    (	X1 = [*,S],     Y1 = [+,lam,S]     , F = [*,S]      );
+	    (	X1 = [+,lam,S], Y1 = [*,S]         , F = [*,S]      );   %mirror of last two
+	    (	X1 = [+,S,lam], Y1 = [*,S]         , F = [*,S]      );
+	    (	                                     F = [^,X1,Y1])) .
+add_carrot([X|Xs],F):-
+	add_op(X,Y),
+	add_carrot(Xs,Ys),
+	(   (   Y = lam  ,     Ys = lam            , F = lam        );
+	    (   Y = [*,S],     Ys = [*,S]          , F = [*,S]      );
+	    (   Y = [*,S],     Ys = [+,S,lam]      , F = [*,S]      );
+	    (	Y = [*,S],     Ys = [+,lam,S]      , F = [*,S]      );
+	    (	Y = [+,lam,S], Ys = [*,S]          , F = [*,S]	    );
+	    (	Y = [+,S,lam], Ys = [*,S]          , F = [*,S]      );
+	    (	Y = [+,lam,S], Ys = [^,[*,S],K]    , F = [^,[*,S],K]);  % higher level version of the same above
+	    (	Y = [+,S,lam], Ys = [^,[*,S],K]    , F = [^,[*,S],K]);
+
+	    (				             F = [^,Y,Ys])) .
+
+
+
+
+
+% aside from the populate_control family of functions, the add_op family
+% of functions is the next-most important, as they will not only
+% preprocess the end result for turning into terms, but will reduce the
+% overall size of the regex generated, through redundant pattern
+% elimination
+add_op([+,X,Y],[+,X,Y]):-
+	not(is_list(X)),
+	not(is_list(Y)).
+add_op([+|Xs],Ys):-
+	add_plus(Xs,Ys).
+add_op([*,X],F):-
+	add_op(X,Y),
+	(   (Y  = [*,K]    , F = [*,K]);
+	(   (Y  = [+,lam,K], F = [*,K]));
+	(   (Y  = [+,K,lam], F = [*,K]));
+	(   (Y \= [*,_]    , F = [*,Y]))).
+add_op([^|Xs],Ys):-
+	add_carrot(Xs,Ys).
+add_op(X,X):-
+	not(is_list(X)).
+
+
+
+getList(_,[],_,[]).
+getList(Int,[(Inter-_)|Xs],K,[A|As]):-
+	access_elem(Int,Inter,K,A),
+	getList(Int,Xs,K,As).
+
+
+last_elem([X|[]],X).
+last_elem([_|Xs],X):-
+	last_elem(Xs,X).
+
+
+
+% populate takes as arguments, the first frame of the 3d block, and two
+% state lists, one for the rows, one for the columns, and also the list
+% of the edges
+populate([],[],[_|_],[_|_]).
+populate([],(_-_),[],[_|_]).
+populate([X|Xs],[(Int-Char)|Ys],[(Inter-Charizard)|Zs],K):- %on a non-empty first list,
+					 %the algorithm makes a call to the overloaded non-list
+	                                 %second argument version, and calls the listed version
+	                                 %with the leftovers of the first list
+	populate(X,(Int-Char),[(Inter-Charizard)|Zs],K),
+	populate(Xs,Ys,[(Inter-Charizard)|Zs],K).
+populate([X|Xs],(Int-Char),[(Inter-Charizard)|Zs],K):-       %The non-list version checks if the
+	       %element is on the diagonal, and if so, adds lambda, as well as the character
+	       %labeling the edge from the vertex to itself, if it exists
+	(   (   Int == Inter, !,
+	    ( ( member(t(Int,Int,Char),K), X = [+,Char,lam]);
+	    (   X = lam)));                    %If the element is not on the diagonal, then it is only
+					       %set to the char label of the edge from state
+	                                       %Int to state Inter, if it exists, if not, it is set to null
+	(   (member(t(Int,Inter,Charizard),K), X = Charizard); (X = null))),
+	populate(Xs,(Int-Char),Zs,K).
+
+
+
+
+% Much like transition_scribe is the workhorse of the regex -> DFA
+% process, so populate_control and its family of helper functions is the
+% workhorse of the DFA -> regex process.
+% Populate_control is the 3d control function involved in the process,
+% mostly just calling populater on each frame
+populate_control(_,[],_).
+populate_control(ThreeH,[X|Xs],Index):-
+	populater(ThreeH,X,0,Index),
+	Index2 is Index + 1,
+	populate_control(X,Xs,Index2).
+
+
+% populater, similar to populate_control, is the 2d control function
+% involved.
+populater(_,[],_,_).
+populater(Prev,[X|Xs],Row,Index):-
+	populous(Prev,X,0,Row,Index),
+	Row2 is Row + 1,
+	populater(Prev,Xs,Row2,Index).
+
+
+% populous then is the function which does all of the actual
+% assignments, retrieving the relevant elements of the previous frame
+% and interpreting the results retrieved into the (L_ij)^(k+1) =
+% ((L_ij)^(k)+ (L_i,k+1)^(k)[(L_(k+1),(k+1))^(k)]*((L_k+1,j)^(k)))
+% formula used in the Floyd-Warshall-esque DFA->Regex algorithm,
+% performing some elementary reductions, such as removing
+% null-containing concat groups or union elements equal to null from the
+% resulting expression, or removing empty iteration groups
+populous(_,[],_,_,_).
+populous(Prev,[X|Xs],Int,Row,Index):-
+	access_elem(Row,Int,Prev,Lij),
+	access_elem(Index,Index,Prev,Iter),
+	access_elem(Row,Index,Prev,First),
+	access_elem(Index,Int,Prev,Second),
+	(   (   (      ((Iter   = null)); ((First  = null));((Second  = null))), (Lij = null) ,X = null,!);
+	(   (   (      ((Iter   = null)); ((First  = null));((Second  = null))),               X = Lij,!));
+	(   Lij \= null, Iter \= lam,            X = [+,Lij,[^,First,[*,Iter],Second]]                   );
+	(   Lij \= null, Iter  = lam,            X = [+,Lij,[^,First,Second]]                            );
+	(   Lij  = null, Iter \= lam,            X = [^,First,[*,Iter],Second]                           );
+	(   Lij  = null, Iter  = lam,            X = [^,First,Second]                                   )),
+	Int2 is Int + 1,
+	populous(Prev,Xs,Int2,Row,Index).
+
+
+
+
+% state_read takes the input file and returns the associative list of
+% states with their numbers and the character associated with them, as
+% well as the list of edges
+%
+% state_read(+FileStream,-Associative (Int-Char) state list,-EdgeList)
+state_read(Y,[(F-Fs)|Xs],[t(A,F,Fs)|Ts]):-
+	(   (read(Y,t(A,F,Fs)), state_read(Y,Xs,Ts),!);
+	Xs = [],Ts = [],!).
+
+
+% final_read takes the input file and returns the associative list of
+% states with their numbers and the character required to transition to
+% them
+%
+% final_read(+FileStream,-ListofFinalStates)
+final_read(Y,[(F-Fs)|Xs]):-
+	(   (read(Y,final(F,Fs)), final_read(Y,Xs),!);
+	Xs = [],!).
+
+
+% three_d_list creates a three-dimensional array with X many calls to
+% two_d_list
+three_d_list(0,_,_,[]).
+three_d_list(X,Y,Z,[F|Fs]):-
+	X > 0,
+	two_d_list(Y,Z,F),
+	Size2 is X -1,
+	three_d_list(Size2,Y,Z,Fs),!.
+
+
+% two_d_list creates a two-dimensional array with Size many calls to
+% one_d_list for lists of size Sizer
+two_d_list(0,_,[]).
+two_d_list(Size,Sizer,[X|Xs]):-
+	Size > 0,
+	one_d_list(Sizer,X),
+	Size2 is Size -1,
+	two_d_list(Size2,Sizer,Xs),!.
+
+
+
+% one_d_list creates an array, more or less, of unassigned random
+% variables of a specified size Size
+one_d_list(0,[]).
+one_d_list(Size,[_|Xs]):-
+	Size > 0,
+	Size2 is Size - 1,
+	one_d_list(Size2,Xs),!.
+
+% access_elem is overloaded to allow calls to be made for accessing
+% elements in a given three-d array, two-d array, or one dimensional
+% list. The algorithm used to turn a DFA into a regex necessitates this
+% array-based approach, and since constant time access is not possible
+% in prolog, the n^3 number of instantiations and declarations for
+% running the algorithm to completion requires 4 accesses of the
+% previous 'frame' for each declaration, each access of which requires
+% n^2 time to complete, resulting in a total time-complexity of n^5.
+% Clearly, the access then contributes significantly to the running time
+% of the algorithm
+%
+%access_elem(+Frame,+Row,+Column,+Array being searched in,?Resulting
+% item)
+% This can be used for retrieval or assignment of variables
+access_elem(X,Y,0,[F|_],R):-
+	access_elem(X,Y,F,R),!.
+access_elem(X,Y,Z,[_|Xs],R):-
+	Z \= 0,
+	Z2 is Z - 1,
+	access_elem(X,Y,Z2,Xs,R).
+
+
+access_elem(0,X,[Y|_],R):-
+	access_elem(X,Y,R),!.
+access_elem(Y,X,[_|Xs],R):-
+	Y2 is Y-1,
+	access_elem(Y2,X,Xs,R).
+
+
+access_elem(0,[Y|_],Y):-!.
+access_elem(X,[_|Ys],R):-
+	X2 is X - 1,
+	access_elem(X2,Ys,R).
+
+
+
+
+
+
+
+
+
+
+
+
+% program_builder/1 is the master control function for the process of
+% turning regular expressions into programs
+
+
+
+
+%program_builder(+Y):-
+program_builder(Y):-
+	string_chars(Y,A),      %This turns the input string into a list of chars
+	state_builder(A,B,1),
+	reverse(B,BackB),       %This will reverse the state list for use in move_star
+	move_star(BackB,ModBackB),
+	reverse(ModBackB,NewB),
+	carrot_insert(NewB,NewerB), %This will insert carrot operators to denote concatenation
+	term_charrer(NewerB,NewestB),
+	string_chars(S,NewestB),    %This turns the preprocessed list of chars into a string
+	term_string(Term,S),        %This turns the previous string into a term, which can be operated on at a higher level
+	write(Term),
+	nl,
+	(   ((Term =.. [X,Y1,Z]),break_down([X,Y1,Z],F));  %This or block is used in case the Term has
+	                                                   %as its first grouping an iteration group
+	                                                   %or a union group/concatenation group, so that the							   %proper inaugural call to break_down can be made
+	    ((Term =.. [X,Y1],	 break_down([X,Y1],F)))),
+	nl,
+	fix_stacked(F,E),
+	write("What would you like to name your file?"),  %at this point, much of the
+	                      % preprocessing necessary to generate the DFA is done, and an output file
+			      % must be decided upon to write the DFA to
+	read(String),
+	string_concat(String,".pl",F17),
+	open(F17,update,Y17),
+	write(Y17,"%"),
+	write(Y17,Y),
+	write(Y17,"\n"),
+	transition_scribe(E,[_,B3,C3],Y17),
+	print_start(B3,Y17),               %print_start at one time printed start states, but after
+	write(Y17,"nonsense2()."),         %some revisions, the function now prints transitions from a
+	write(Y17,'\n'),                   %start state 0 to the states retrieved as start states from
+	print_fin(C3,Y17),                 %transition scribe. print_fin simply prints the states labeled
+	% as final states by transition_scribe
+
+
+	(   (contains_star(Term), write(Y17,"final(0,l).\n"));true), % this line determines if 0 is a final state
+	                                      %essentially deciding if the empty string is admitted. This is true
+					      %if there is an iteration group either as the first grouping
+					      %or in the first layer union group, if it is the first layer
+	write(Y17,"\n"),
+	write(Y17,"\ntraverser(Z,[X|[]]):- \n"),
+	write(Y17,"t(Z,Y,X),\n"),
+	write(Y17,"final(Y,X).\n"),
+	write(Y17,"traverser(Z,[X|Xs]):-\n"),     %This is just printing the standard traversal function
+	write(Y17,"t(Z,Y,X),\n"),                 %to the output file, so that the function which name the user
+	write(Y17,"traverser(Y,Xs).\n\n"),        %decides upon can be used to check membership of a string
+	write(Y17,"traverse([]):-\n"),            %in the DFA generated.
+	write(Y17,"final(0,l).\n"),               % The only downside of this is that the standardized nature makes
+	write(Y17,"traverse([X|[]]):-\n"),        % any program's edges be possibly used in any other program's traversals
+	write(Y17,"t(0,Z,X),\n"),                 % requiring 'old' files to be unloaded before running a 'new' one
+	write(Y17,"final(Z,X).\n"),
+	write(Y17,"traverse([X|Xs]):-\n"),
+	write(Y17,"traverser(0,[X|Xs]).\n\n"),
+	write("Please enter your function name"),
+	read(Fname),
+	write(Y17,Fname),
+	write(Y17,"():-\n"),
+	write(Y17,"X = '< Please input your string! ',\n"),
+	write(Y17,"write(X),\n"),
+	write(Y17,"nl, \n"),
+	write(Y17,"write('> '),\n"),
+	write(Y17,"read(Y),\n"),
+	write(Y17,"nl, \n"),
+	write(Y17,"string_chars(Y,Z),\n"),
+	write(Y17,"(   (   traverse(Z), write('< Success!'));\n"),
+	write(Y17,"(	write('< Failure!'))).\n"),
+	close(Y17),                       % After the file is closed, the standard consult function is used
+	consult(F17).                     % to load the file so it can be immediately used.
+
+
+
+
+contains_star(K):-
+	K =.. [*,_].
+contains_star(K):-
+	K =.. [+,A,B],
+	(   contains_star(A);contains_star(B)).
+
+has_op(Term):-
+	term_string(Term,String),
+	(
+	string_code(_,String,'*');
+	string_code(_,String,'+');
+	string_code(_,String,'^')).
+
+
+
+% break_down takes the regex which has now been preprocessed into a
+% term with all the relevant operators in their proper places and, as
+% one might expect, breaks them down into lists of operable groups, so
+% that each respective regex operator (iteration, concatenation, and
+% union) can then be analyzed properly for edges between elements within
+% the group. For example, while (a1^b2+(*(a3))) looks nice,
+% [+,[^,a1,b2],[*,a3]] is a more useful description computationally.
+break_down([X,Y,Z],[X,Y1,Z1]):-
+	has_op(Y),
+	has_op(Z),
+	(  (Y =.. [Y2,Y3,Y4],
+	    Z =.. [Z2,Z3,Z4],
+	    !,
+	    break_down([Z2,Z3,Z4],Z1),
+	    break_down([Y2,Y3,Y4],Y1));
+	   (Y =.. [Y2,Y3],
+	    Z =.. [Z2,Z3],
+	    !,
+	    break_down([Y2,Y3],Y1),
+	    break_down([Z2,Z3],Z1));
+	   (Y =.. [Y2,Y3,Y4],
+	    Z =.. [Z2,Z3],
+	    !,
+	    break_down([Y2,Y3,Y4],Y1),
+	    break_down([Z2,Z3],Z1));
+	   (Y =.. [Y2,Y3],
+	    Z =.. [Z2,Z3,Z4],
+	    !,
+	    break_down([Y2,Y3],Y1),
+	    break_down([Z2,Z3,Z4],Z1))).
+break_down([X,Y,Z],[X,Y1,Z]):-
+	has_op(Y),
+	(   (Y =.. [Y2,Y3,Y4],
+	     !,
+	     break_down([Y2,Y3,Y4],Y1));
+	    (Y =.. [Y2,Y3],
+	     !,
+	     break_down([Y2,Y3],Y1))).
+break_down([X,Y,Z],[X,Y,Z1]):-
+	has_op(Z),
+	(   (Z =.. [Z2,Z3,Z4],
+	     !,
+	     break_down([Z2,Z3,Z4],Z1));
+	    (Z =.. [Z2,Z3],
+	     !,
+	     break_down([Z2,Z3],Z1))).
+break_down([X,Y],[X,Y1]):-
+	has_op(Y),
+	(   (Y =.. [Y2,Y3,Y4],
+	     !,
+	     break_down([Y2,Y3,Y4],Y1));
+	    (Y =.. [Y2,Y3],
+	     !,
+	     break_down([Y2,Y3],Y1))).
+break_down(X,X).
+
+
+
+% term_charrer's purpose is taking the mixed list of terms and chars and
+% producing a list of only chars, that can then be operated upon more
+% uniformly by functions like string_chars
+term_charrer([],[]).
+term_charrer(['('|Xs],['('|Ys]):-
+	!,
+	term_charrer(Xs,Ys).
+term_charrer([')'|Xs],[')'|Ys]):-
+	!,
+	term_charrer(Xs,Ys).
+term_charrer(['*'|Xs],['*'|Ys]):-
+	!,
+	term_charrer(Xs,Ys).
+term_charrer(['+'|Xs],['+'|Ys]):-
+	!,
+	term_charrer(Xs,Ys).
+term_charrer(['^'|Xs],['^'|Ys]):-
+	!,
+	term_charrer(Xs,Ys).
+term_charrer([X|Xs],[X|Ys]):-
+	integer(X),
+	!,
+	term_charrer(Xs,Ys).
+term_charrer([X|Xs],F):-
+	term_string(X,A),
+	string_chars(A,B),
+	term_charrer(Xs,Ys),
+	append(B,Ys,F).
+
+%get_num and get_charred simply return the name-specific
+%elements of a state which has been turned into a list of chars
+get_num([_|F],F).
+get_charred([F|_],F).
+
+%get_char_and_num returns as separate elements the character
+% and number associated with the state that has been turned into a list
+% of chars
+get_char_and_num([A|B],A,B).
+
+
+% state_to_char_and_num returns the input character and the number
+% associated with a state
+state_to_char_and_num(X,Char,Num):-
+	term_string(X,F),
+	string_chars(F,E),
+	get_char_and_num(E,Char,Num).
+
+
+% Despite its name, state_to_chars returns the number associated with a
+% state
+state_to_chars(X,Num):-
+	term_string(X,F),
+	string_chars(F,E),
+	get_num(E,Num).
+
+
+%state_to_char and state_to_num do exactly as their names might suggest,
+% that is, they return the character or number associated with the state
+% passed to them
+state_to_char(X,Num):-
+	term_string(X,F),
+	string_chars(F,E),
+	get_charred(E,Num).
+
+state_to_num(X,N):-
+	term_string(X,F),
+	string_chars(F,E),
+	get_num(E,Num),
+	number_string(N,Num).
+
+
+
+
+% state_builder will take an input list of chars and output the same
+% list, but with the input characters labeled with numbers from left to
+% right, as the algorithm for turning a regex into a DFA does, e.g.
+% (a+(ab)*) => (a1+((a2)(b3))*)
+state_builder([],[],_):-
+	!.
+state_builder([X|Xs],[Y|Ys],F):-
+	(   X = '(',! ;
+	    X = ')',! ;
+	    X = '*',! ;
+	    X = '+',! ),
+	Y = X,
+	state_builder(Xs,Ys,F);
+	number_string(F,NewF),
+	string_chars(NewF,NewerF),
+	term_string(E,[X|NewerF]),
+	Y = E,
+	F1 is F + 1,
+	state_builder(Xs,Ys,F1),!.
+
+
+
+carrot_insert([X|[]],[X|[]]):-
+	!.
+carrot_insert([X,Y|Xs],[X|Ys]):-
+	(   X = '(';
+	X = ')',Y = ')';
+	X = '*';
+	X = '^';
+	X = '+';
+	X = '(',Y = '(';
+	Y = ')';
+	Y = '*';
+	Y = '^';
+	Y = '+'),
+	!,
+	carrot_insert([Y|Xs],Ys).
+carrot_insert([X,Y|Xs],[X,'^'|Ys]):-
+	X \= '(',
+	%X \= ')',
+	X \= '*',
+	X \= '^',
+	X \= '+',
+	%Y \= '(',
+	Y \= ')',
+	Y \= '*',
+	Y \= '^',
+	Y \= '+',
+	carrot_insert([Y|Xs],Ys).
+
+
+
+get_parentheses2([')'|Xs],A,[')'|[]],Xs):-
+	A is 0,
+	!.
+get_parentheses2([X|Xs],A,[X|Ys],Fs):-
+	(   X = '(', A1 is A +1, get_parentheses2(Xs,A1,Ys,Fs),!);
+	(   X = ')', A \= 0, A1 is A -1, get_parentheses2(Xs,A1,Ys,Fs),!);
+	(   get_parentheses2(Xs,A,Ys,Fs)).
+
+move_star2([],[]).
+move_star2([A],[A]):-
+	A \= '*',
+	not(is_list(A)).
+move_star2([X,Y|Xs],['(','(',Y,')',X,')'|Ys]):-
+	X = '*',
+	Y \= ')',
+	Y \= '(',
+	Y \= '+',
+	Y \= '^',
+	Y \= '*',
+	!,
+	move_star2(Xs,Ys).
+move_star2([X,Y|Xs],[Y|F1]):-
+	X = '*',
+	Y = '(',
+	get_parentheses2(Xs,0,E,Es),
+	append(E,[X],F),
+	append(['('|[]],F,F2),
+	append(F2,[')'|[]],F3),
+	move_star2(F3,F0_5),
+	move_star2(Es,F0_75),
+	append(F0_5,F0_75,F1),!.
+move_star2([X,Y|Xs],[X|Ys]):-
+	X \= '*',
+	move_star2([Y|Xs],Ys),!.
+move_star2([X,Y|Xs],[X,Y|Ys]):-
+	X = '*',
+	Y = ')',
+	move_star2(Xs,Ys),!.
+
+
+
+
+
+% get_parentheses gets the substring in the list of chars
+% which has the parenthetical statement immediately following the '*'
+% which move_star is trying to move
+%
+% get_parentheses(+CharList,+ParenthesesCount,-Substring,-RestOfString)
+get_parentheses(['('|Xs],A,['('|[]],Xs):-
+	A is 0,
+	!.
+get_parentheses([X|Xs],A,[X|Ys],Fs):-
+	(   X = ')', A1 is A +1, get_parentheses(Xs,A1,Ys,Fs),!);
+	(   X = '(', A \= 0, A1 is A -1, get_parentheses(Xs,A1,Ys,Fs),!);
+	(   get_parentheses(Xs,A,Ys,Fs)).
+
+
+
+% The purpose of move_star is to take a list of chars, and
+% output a modified list that has moved the '*' to the front of any
+% parenthetical group, or individual character, as well as packaging it
+% in parentheses to ensure its distinctness relative to its surroundings
+% This is necessary, because to use the '=..' operator on statements
+% including the '*' it must be at the beginning, e.g. (*(ab)) =.. [*,ab]
+% But in standard regex notation, the star comes at the end of the
+% iterated group, so it must be moved to be intelligible to prolog
+move_star([],[]).
+move_star([A],[A]):-
+	A \= '*',
+	not(is_list(A)).
+move_star([X,Y|Xs],[')',')',Y,'(',X,'('|Ys]):-
+	X = '*',
+	Y \= ')',
+	Y \= '(',
+	Y \= '+',
+	Y \= '^',
+	Y \= '*',
+	!,
+	move_star(Xs,Ys).
+move_star([X,Y|Xs],[Y|F1]):-
+	X = '*',
+	Y = ')',
+	get_parentheses(Xs,0,E,Es),
+	append(E,[X],F),
+	append([')'|[]],F,F2),
+	append(F2,['('|[]],F3),
+	move_star(F3,F0_5),
+	move_star(Es,F0_75),
+	append(F0_5,F0_75,F1),!.
+move_star([X,Y|Xs],[X|Ys]):-
+	X \= '*',
+	move_star([Y|Xs],Ys),!.
+move_star([X,Y|Xs],[X,Y|Ys]):-
+	X = '*',
+	Y = '(',
+	move_star(Xs,Ys),!.
+
+
+
+
+
+% the purpose of fix_stacked is to take lists of the type
+% [^,a1,[^,b2,c3]] and turn them into lists of type [^,a1,b2,c3],
+% this helps in later recursive tasks
+fix_stacked([A,B,C],[A,B,C]):-
+	not(is_list(B)),
+	not(is_list(C)).
+fix_stacked(A,A):-
+	not(is_list(A)).
+fix_stacked(['*',['*',F]],['*',F1]):-
+	fix_stacked(F,F1).
+fix_stacked([A,[B,C]],[A|F]):-
+	A \= B,
+	fix_stacked([B,C],F).
+fix_stacked([A,B],[A,B]):-
+	not(is_list(B)).
+fix_stacked([A,[B,C,D]],[A,F]):-
+	fix_stacked([B,C,D],F).
+fix_stacked([A,[A,B,C],[D,E,F]],K):-
+	A \= D,
+	fix_stacked([A,B,C],[A|B1]),
+	fix_stacked([D,E,F],[D|F1]),
+	append([A|B1],[[D|F1]],K).
+fix_stacked([A,[D,E,F],[A,B,C]],[A,[D|F1]|B1]):-
+	A \= D,
+	fix_stacked([A,B,C],[A|B1]),
+	fix_stacked([D,E,F],[D|F1]).
+fix_stacked([A,[B,C,D],[E,F,G]],[A,[B|C1],[E|F1]]):-
+	A \= B,
+	A \= E,
+	fix_stacked([B,C,D],[B|C1]),
+	fix_stacked([E,F,G],[E|F1]).
+fix_stacked([A,[B,C],[D,E,F]],[A,B1,[D|F1]]):-
+	A \= D,
+	fix_stacked([B,C],B1),
+	fix_stacked([D,E,F],[D|F1]).
+fix_stacked([A,[B,C,D],[E,F]],[A,B1,F1]):-
+	A \= B,
+	fix_stacked([B,C,D],B1),
+	fix_stacked([E,F],F1).
+fix_stacked([A,[A,B,C],[D,E]],[A,B1,C1,F1]):-
+	fix_stacked([A,B,C],[A,B1,C1]),
+	fix_stacked([D,E],F1).
+fix_stacked([A,[B,C],[A,E,F]],[A,B1|E1]):-
+	fix_stacked([B,C],B1),
+	fix_stacked([A,E,F],[A|E1]).
+fix_stacked([A,[A,B,C],D],[A,B1,C1,D]):-
+	not(is_list(D)),
+	fix_stacked([A,B,C],[A,B1,C1]).
+fix_stacked([A,D,[A,B,C]],F):-
+	not(is_list(D)),
+	fix_stacked([A,B,C],[A|B1]),
+	append([A,D],B1,F).
+fix_stacked([A,[B,C],D],[A,B1,D]):-
+	not(is_list(D)),
+	fix_stacked([B,C],B1).
+fix_stacked([A,D,[B,C]],[A,D,B1]):-
+	not(is_list(D)),
+	fix_stacked([B,C],B1).
+fix_stacked([A,[E,B,C],D],[A,B1,D]):-
+	A \= E,
+	not(is_list(D)),
+	fix_stacked([E,B,C],B1).
+fix_stacked([A,D,[E,B,C]],[A,D,B1]):-
+	A \= E,
+	not(is_list(D)),
+	fix_stacked([E,B,C],B1).
+fix_stacked([A,[B,C],[B,D]],[A,B1,B2]):-
+	fix_stacked([B,C],B1),
+	fix_stacked([B,D],B2).
+
+
+print_start([],_).
+print_start([X|Xs],E):-
+	state_to_char_and_num(X,X2,X1),
+	F2 = ['t','(','0',','],
+	append(F2,X1,F3),
+	F4 = [',',X2,')','.'],
+	append(F3,F4,F5),
+	string_chars(F6,F5),
+	write(E,F6),
+	write(E,'\n'),
+
+	print_start(Xs,E).
+
+print_fin([],_).
+print_fin([X|Xs],E):-
+	state_to_char_and_num(X,X2,X1),
+	F2 = ['f','i','n','a','l','('],
+	append(F2,X1,F3),
+	F4 = [',',X2,')','.'],
+	append(F3,F4,F5),
+	string_chars(F6,F5),
+	write(E,F6),
+	write(E,'\n'),
+
+	print_fin(Xs,E).
+
+
+
+% print_it essentially prints the cartesian product of two sets
+% of vertices, in the form of edges between them
+print_it(_,[],_).
+print_it(Xs,[Y|Ys],E):-
+	repeat,
+	(   (select(X,Xs,_),
+	X \= [],
+	state_to_char_and_num(Y,Y3,Y1),
+	state_to_chars(X,X1),
+	F1 = ['t','('],
+	F2 = [',',Y3,')','.'],
+	append(F1,X1,F3),
+	append(F3,[','],F4),
+	append(F4,Y1,F5),
+	append(F5,F2,F6),
+	string_chars(T2,F6),
+	write(E,T2),
+	write(E,'\n'),
+
+	fail,!);
+	(   print_it(Xs,Ys,E),
+	!)).
+
+
+
+
+% transition_scribe is the real work-horse of the whole program, as it
+% will be transcribing the actual edges of the DFA into the destination
+% file. Depending on the group (concat, union, or iteration) that is the
+% main argument of the call, transtion_scribe will delve recursively
+% into what makes up that group, and retrieve a list of start and final
+% states,and depending on the parent group, will combine
+% that information and decide between which groups there are edges, and
+% make the appropriate calls to print those edges into the destination
+% file
+% transition_scribe(+ParentGroup,-List of start and final state
+% lists,+File to write edges to)
+transition_scribe([+],[+,[],[]],_).
+transition_scribe(X,[a,[X],[X]],_):-  % This is an atomic case, which will return this state
+	not(is_list(X)).              % as the set of start and final states
+transition_scribe([+,X],[+,[X],[X]],_):-         %This is the trivial union case, which simply
+	not(is_list(X)).                         %handles a completed union group traversal
+transition_scribe([+,[]],[+,[],[]],_).
+transition_scribe([+,X|Xs],[+,S,F],Y):-        % This case is the normal, uncompleted union case
+	transition_scribe(X,[_,S1,F1],Y),      % As can be seen, a union group by itself
+	                                       % generates no edges, as there are only disjunctions
+					       % between its elements by default
+	transition_scribe([+|Xs],[+,S2,F2],Y),
+	append(S1,S2,S),
+	append(F1,F2,F).
+transition_scribe([^],[^,[],[]],_).            %Base, termination case of iteration group
+transition_scribe([^,X,Y,Z|Xs],[^,S,F],E):-    %This is the case where there are two groups around
+	transition_scribe(Y,[*,S2,F2],E),      %an iteration group, necessitating a path between the two
+	transition_scribe(X,[_,S,F1],E),       %surrounding groups, as a result of the fact that the
+	transition_scribe(Z,[_,S3,_],E),       %iteration group could be the empty string
+	print_it(F1,S2,E),                     %Then the scribe continues on with [^,Y,Z|Xs], this might
+	print_it(F1,S3,E),                     %induce redundancies, but this isn't a problem, at most
+	print_it(F2,S3,E),                     %it introduces a slight element of useless nondeterminism
+	transition_scribe([^,Y,Z|Xs],[^,_,F],E).
+transition_scribe([^,X],[^,S,F],Y):-	       % another base termination case of iteration group
+	not(is_list(X)),
+	transition_scribe(X,[_,S,F],Y).
+transition_scribe([^,X],[^,S,F],Y):-           %another base termination case of iteration group
+        is_list(X),
+	transition_scribe(X,[_,S,F],Y).
+transition_scribe([^,X,Y|[]],[^,S,F],E):-
+	transition_scribe(Y,[*,S2,F2],E),
+	transition_scribe(X,[_,S,F1],E),
+	print_it(F1,S2,E),
+	append(F1,F2,F).
+transition_scribe([^,X,Y|Xs],[^,S,F],E):-   % the ordinary, non-iteration-group case of a concat group
+	transition_scribe(X,[_,S,F1],E),
+	transition_scribe(Y,[_,S2,_],E),
+	print_it(F1,S2,E),
+	transition_scribe([^,Y|Xs],[^,_,F],E).
+transition_scribe([*,X],[*,S,F],Y):-        % The iteration group requires only one case
+	transition_scribe(X,[_,S,F],Y),
+	print_it(F,S,Y).
+transition_scribe([*],[*,[],[]],_).
+
+
+
+
+
+
+
+
+
